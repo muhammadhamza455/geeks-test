@@ -124,6 +124,23 @@ def test_rate_limiter_enforces_budget():
     assert limiter.allow(now=161.0) is True
 
 
+def test_settings_auto_detects_generic_llm_api_key():
+    s_ant = Settings(llm_provider="auto", llm_api_key="sk-ant-test123", openai_api_key="", anthropic_api_key="", gemini_api_key="")
+    assert s_ant.resolved_llm_provider() == "anthropic"
+    assert s_ant.effective_api_key("anthropic") == "sk-ant-test123"
+
+    s_gem = Settings(llm_provider="auto", llm_api_key="AIzaSyTestKey", openai_api_key="", anthropic_api_key="", gemini_api_key="")
+    assert s_gem.resolved_llm_provider() == "gemini"
+    assert s_gem.effective_api_key("gemini") == "AIzaSyTestKey"
+
+    s_oai = Settings(llm_provider="auto", llm_api_key="sk-proj-test", openai_api_key="", anthropic_api_key="", gemini_api_key="")
+    assert s_oai.resolved_llm_provider() == "openai"
+    assert s_oai.effective_api_key("openai") == "sk-proj-test"
+
+    s_none = Settings(llm_provider="auto", llm_api_key="", openai_api_key="", anthropic_api_key="", gemini_api_key="")
+    assert s_none.resolved_llm_provider() == "heuristic"
+
+
 @pytest.mark.asyncio
 async def test_pulse_summary_heuristic_and_caching():
     settings = Settings(llm_provider="heuristic", openai_api_key="", anthropic_api_key="", gemini_api_key="")

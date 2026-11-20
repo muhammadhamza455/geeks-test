@@ -59,16 +59,13 @@ class RollingStats:
         current = now if now is not None else time.time()
         self._total_processed += 1
 
-        # Store in recent ring buffer & lookup table
-        if len(self._recent) == self._recent.maxlen and self._recent:
-            evicted = self._recent[0]
-            self._edits_by_id.pop(evicted.id, None)
+        # Store in recent ring buffer
         self._recent.append(edit)
-        self._edits_by_id[edit.id] = edit
 
-        # Only include in 5-minute window if not already older than 5 minutes
+        # Only include in 5-minute window (and lookup index) if not already older than 5 minutes
         if edit.timestamp >= current - self.WINDOW_5M_SECONDS:
             self._window_5m.append(edit)
+            self._edits_by_id[edit.id] = edit
 
         # Record into minute history bucket (last 10 minutes)
         minute_ts = int(edit.timestamp // 60) * 60
@@ -107,7 +104,9 @@ class RollingStats:
 
         # Timestamps are mostly monotonic, though out-of-order events can occasionally appear.
         while self._window_5m and self._window_5m[0].timestamp < cutoff_5m:
-            self._window_5m.popleft()
+            evicted = self._window_5m.popleft()
+            if self._edits_by_id.get(evicted.id) is evicted:
+                self._edits_by_id.pop(evicted.id, None)
 
         cutoff_minute = int((current - (self.HISTORY_MINUTES + 1) * 60) // 60) * 60
         expired_minutes = [m for m in self._bucket_counts if m < cutoff_minute]

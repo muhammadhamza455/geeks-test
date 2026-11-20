@@ -240,10 +240,11 @@ class AIService:
         client = self._external_client or httpx.AsyncClient(timeout=httpx.Timeout(12.0))
         try:
             if provider == "openai":
+                api_key = self.settings.effective_api_key("openai")
                 resp = await client.post(
                     f"{self.settings.openai_base_url}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {self.settings.openai_api_key}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
@@ -261,10 +262,11 @@ class AIService:
                 return data["choices"][0]["message"]["content"]
 
             if provider == "anthropic":
+                api_key = self.settings.effective_api_key("anthropic")
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={
-                        "x-api-key": self.settings.anthropic_api_key,
+                        "x-api-key": api_key,
                         "anthropic-version": "2023-06-01",
                         "Content-Type": "application/json",
                     },
@@ -282,13 +284,14 @@ class AIService:
                 return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
             if provider == "gemini":
+                api_key = self.settings.effective_api_key("gemini")
                 url = (
                     f"https://generativelanguage.googleapis.com/v1beta/models/"
                     f"{self.settings.gemini_model}:generateContent"
                 )
                 resp = await client.post(
                     url,
-                    params={"key": self.settings.gemini_api_key},
+                    params={"key": api_key},
                     headers={"Content-Type": "application/json"},
                     json={
                         "systemInstruction": {"parts": [{"text": system_prompt}]},

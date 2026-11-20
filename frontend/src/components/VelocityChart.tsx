@@ -20,17 +20,18 @@ export function VelocityChart({ stats }: VelocityChartProps) {
   // SVG chart dimensions
   const width = 560;
   const height = 112;
-  const padX = 16;
+  const padLeft = 30;
+  const padRight = 14;
   const padTop = 12;
   const padBottom = 22;
-  const plotW = width - padX * 2;
+  const plotW = width - padLeft - padRight;
   const plotH = height - padTop - padBottom;
 
   const points = history.map((bucket, idx) => {
     const x =
       history.length > 1
-        ? padX + (idx / (history.length - 1)) * plotW
-        : padX + plotW / 2;
+        ? padLeft + (idx / (history.length - 1)) * plotW
+        : padLeft + plotW / 2;
     const y = padTop + plotH - (bucket.count / maxVal) * plotH;
     return { x, y, bucket };
   });
@@ -121,19 +122,29 @@ export function VelocityChart({ stats }: VelocityChartProps) {
               </linearGradient>
             </defs>
 
-            {/* Horizontal reference lines */}
+            {/* Horizontal reference lines & Y-axis labels */}
             {[0, 0.5, 1].map((frac) => {
               const y = padTop + plotH * (1 - frac);
+              const tickVal = Math.round(maxVal * frac);
               return (
-                <line
-                  key={frac}
-                  x1={padX}
-                  x2={width - padX}
-                  y1={y}
-                  y2={y}
-                  stroke="rgba(148, 163, 184, 0.14)"
-                  strokeDasharray="3 4"
-                />
+                <g key={frac}>
+                  <line
+                    x1={padLeft}
+                    x2={width - padRight}
+                    y1={y}
+                    y2={y}
+                    stroke="rgba(148, 163, 184, 0.14)"
+                    strokeDasharray="3 4"
+                  />
+                  <text
+                    x={padLeft - 5}
+                    y={y + 3}
+                    textAnchor="end"
+                    className="wp-chart-axis-label"
+                  >
+                    {tickVal}
+                  </text>
+                </g>
               );
             })}
 

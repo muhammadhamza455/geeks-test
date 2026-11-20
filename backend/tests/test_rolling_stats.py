@@ -155,3 +155,23 @@ def test_reset_clears_all_windows():
     assert snap.total_processed == 0
     assert snap.top_pages == []
     assert stats.get_recent_edits() == []
+
+
+def test_update_vandalism_survives_recent_eviction_within_5m_and_prunes_after():
+    stats = RollingStats(max_recent=2)
+    base = 1_700_000_000.0
+
+    # Record 4 edits within 5m so e0 is evicted from max_recent=2 but remains in 5m window
+    for i in range(4):
+        stats.record(_make_edit(f"e{i}", title=f"Page{i}", ts=base - 10 + i), now=base)
+
+    updated = stats.update_vandalism(
+        "e0",
+        VandalismAssessment(flagged=True, severity="high", confidence=0.92, reason="Late LLM flag", source="llm"),
+    )
+    assert updated is not None
+    assert stats.get_stats(now=base).flagged_last_5m == 1
+
+    # Advance past 5-minute window: e0 is pruned from lookup map too (no memory leak)
+    stats.prune(now=base + 400)
+    assert stats.update_vandalism("e0", VandalismAssessment()) is None

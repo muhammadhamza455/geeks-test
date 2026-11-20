@@ -70,7 +70,7 @@ cp .env.example .env
 ```
 
 - **Without an API key**: WikiPulse automatically uses its built-in heuristic AI engine for both Pulse Summaries and Vandalism Flags.
-- **With an API key**: Set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` in `.env` (leave `LLM_PROVIDER=auto`). You can also point `OPENAI_BASE_URL` at a local Ollama or OpenAI-compatible server.
+- **With an API key**: Set `LLM_API_KEY` (auto-detects Anthropic `sk-ant-*`, Gemini `AIza*`, or OpenAI-compatible) or any provider-specific variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) in `.env` with `LLM_PROVIDER=auto`. You can also point `OPENAI_BASE_URL` at a local Ollama or OpenAI-compatible server.
 
 ### 2. Run the Python Backend
 

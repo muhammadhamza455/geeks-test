@@ -42,6 +42,7 @@ class WikiPulseRuntime:
         self._stats_task: Optional[asyncio.Task[None]] = None
         self._pulse_task: Optional[asyncio.Task[None]] = None
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        self._mode_lock: asyncio.Lock = asyncio.Lock()
         self._last_pulse_processed: int = -1
 
     def _set_connected(self, connected: bool) -> None:
@@ -168,18 +169,19 @@ class WikiPulseRuntime:
             raise ValueError(f"Unsupported mode: {new_mode}")
         if new_mode == "replay" and not self.settings.sample_file.exists():
             raise FileNotFoundError(f"Sample file not found: {self.settings.sample_file}")
-        await self.stop_stream_task()
-        self.stream_mode = new_mode
-        self.stats.reset()
-        self.ai.clear_cache()
-        self._last_pulse_processed = -1
-        await self.start_stream_task()
-        # Push a clean snapshot to all connected clients so old-mode items clear immediately
-        for ws, wiki_filter in self.ws_manager.iter_clients():
-            f_stats = self.current_stats(wiki_filter=wiki_filter)
-            f_recent = self.stats.get_recent_edits(wiki_filter=wiki_filter, limit=60)
-            f_pulse = await self.ai.generate_pulse_summary(f_stats, f_recent, force=False)
-            await self.ws_manager.send_snapshot(ws, f_stats, f_recent, f_pulse)
+        async with self._mode_lock:
+            await self.stop_stream_task()
+            self.stream_mode = new_mode
+            self.stats.reset()
+            self.ai.clear_cache()
+            self._last_pulse_processed = -1
+            await self.start_stream_task()
+            # Push a clean snapshot to all connected clients so old-mode items clear immediately
+            for ws, wiki_filter in self.ws_manager.iter_clients():
+                f_stats = self.current_stats(wiki_filter=wiki_filter)
+                f_recent = self.stats.get_recent_edits(wiki_filter=wiki_filter, limit=60)
+                f_pulse = await self.ai.generate_pulse_summary(f_stats, f_recent, force=False)
+                await self.ws_manager.send_snapshot(ws, f_stats, f_recent, f_pulse)
 
     async def stop(self) -> None:
         await self.stop_stream_task()

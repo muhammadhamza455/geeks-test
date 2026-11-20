@@ -55,6 +55,7 @@ export function useWikiPulse(): UseWikiPulseResult {
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const pingTimerRef = useRef<number | null>(null);
+  const pulseTimeoutRef = useRef<number | null>(null);
 
   pausedRef.current = paused;
   filterRef.current = wikiFilter;
@@ -99,9 +100,16 @@ export function useWikiPulse(): UseWikiPulseResult {
   const refreshPulse = useCallback(() => {
     const ws = wsRef.current;
     setIsRefreshingPulse(true);
+    if (pulseTimeoutRef.current !== null) {
+      window.clearTimeout(pulseTimeoutRef.current);
+      pulseTimeoutRef.current = null;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "refresh_pulse" }));
-      window.setTimeout(() => setIsRefreshingPulse(false), 6000);
+      pulseTimeoutRef.current = window.setTimeout(() => {
+        pulseTimeoutRef.current = null;
+        setIsRefreshingPulse(false);
+      }, 6000);
     } else {
       const q = filterRef.current ? `?wiki=${encodeURIComponent(filterRef.current)}` : "";
       fetch(`/api/pulse/refresh${q}`, { method: "POST" })
@@ -144,6 +152,10 @@ export function useWikiPulse(): UseWikiPulseResult {
         window.clearInterval(pingTimerRef.current);
         pingTimerRef.current = null;
       }
+      if (pulseTimeoutRef.current !== null) {
+        window.clearTimeout(pulseTimeoutRef.current);
+        pulseTimeoutRef.current = null;
+      }
     };
 
     const connect = () => {
@@ -180,14 +192,24 @@ export function useWikiPulse(): UseWikiPulseResult {
         }
 
         if (msg.type === "snapshot") {
+          pausedQueueRef.current = [];
+          setQueuedCount(0);
           setStats(msg.stats);
           setEdits(msg.recent_edits.slice(0, MAX_FEED_ITEMS));
           setPulse(msg.pulse);
+          if (pulseTimeoutRef.current !== null) {
+            window.clearTimeout(pulseTimeoutRef.current);
+            pulseTimeoutRef.current = null;
+          }
           setIsRefreshingPulse(false);
         } else if (msg.type === "stats") {
           setStats(msg.stats);
         } else if (msg.type === "pulse") {
           setPulse(msg.pulse);
+          if (pulseTimeoutRef.current !== null) {
+            window.clearTimeout(pulseTimeoutRef.current);
+            pulseTimeoutRef.current = null;
+          }
           setIsRefreshingPulse(false);
         } else if (msg.type === "edit") {
           if (pausedRef.current) {

@@ -13,6 +13,7 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+*.tsbuildinfo
 
 # .NET / E2E
 e2e-selenium-csharp/bin/

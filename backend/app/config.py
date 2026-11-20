@@ -51,6 +51,7 @@ class Settings:
 
     # LLM settings
     llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "auto").strip().lower())
+    llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", "").strip())
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip())
     openai_base_url: str = field(
         default_factory=lambda: os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -83,24 +84,40 @@ class Settings:
         ]
     )
 
+    def effective_api_key(self, provider: str) -> str:
+        """Return the API key for the given provider, falling back to generic LLM_API_KEY."""
+        if provider == "openai":
+            return self.openai_api_key or self.llm_api_key
+        if provider == "anthropic":
+            return self.anthropic_api_key or self.llm_api_key
+        if provider == "gemini":
+            return self.gemini_api_key or self.llm_api_key
+        return ""
+
     def resolved_llm_provider(self) -> str:
         """Resolve 'auto' to the first configured LLM provider, or 'heuristic'."""
         if self.llm_provider == "heuristic":
             return "heuristic"
         if self.llm_provider == "openai":
-            return "openai" if self.openai_api_key else "heuristic"
+            return "openai" if self.effective_api_key("openai") else "heuristic"
         if self.llm_provider == "anthropic":
-            return "anthropic" if self.anthropic_api_key else "heuristic"
+            return "anthropic" if self.effective_api_key("anthropic") else "heuristic"
         if self.llm_provider == "gemini":
-            return "gemini" if self.gemini_api_key else "heuristic"
+            return "gemini" if self.effective_api_key("gemini") else "heuristic"
 
-        # auto selection
+        # auto selection: prefer explicit provider keys, then infer from generic LLM_API_KEY
         if self.openai_api_key:
             return "openai"
         if self.anthropic_api_key:
             return "anthropic"
         if self.gemini_api_key:
             return "gemini"
+        if self.llm_api_key:
+            if self.llm_api_key.startswith("sk-ant-"):
+                return "anthropic"
+            if self.llm_api_key.startswith("AIza"):
+                return "gemini"
+            return "openai"
         return "heuristic"
 
     def provider_label(self) -> str:
