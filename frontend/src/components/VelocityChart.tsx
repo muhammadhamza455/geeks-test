@@ -1,5 +1,6 @@
 import { AlertTriangle, FileText, Gauge, Users } from "lucide-react";
 import type { DashboardStats } from "../types";
+import { formatMinuteLabel } from "../utils/format";
 
 interface VelocityChartProps {
   stats: DashboardStats | null;
@@ -101,7 +102,7 @@ export function VelocityChart({ stats }: VelocityChartProps) {
 
       <div className="wp-card wp-chart-card">
         <div className="wp-chart-header">
-          <span className="wp-chart-title">Edit Velocity — Last 10 Minutes (UTC buckets)</span>
+          <span className="wp-chart-title">Edit Velocity — Last 10 Minutes</span>
           <span className="wp-chart-legend">
             <span className="wp-legend-dot wp-legend-blue" /> Total edits
             <span className="wp-legend-dot wp-legend-red" /> Flagged
@@ -163,7 +164,7 @@ export function VelocityChart({ stats }: VelocityChartProps) {
             {points.map(({ x, y, bucket }) => (
               <g key={bucket.minute_ts}>
                 <circle cx={x} cy={y} r="3.2" fill="#38bdf8">
-                  <title>{`${bucket.label} UTC: ${bucket.count} edits (${bucket.flagged_count} flagged)`}</title>
+                  <title>{`${formatMinuteLabel(bucket.minute_ts)}: ${bucket.count} edits (${bucket.flagged_count} flagged)`}</title>
                 </circle>
                 {bucket.flagged_count > 0 && (
                   <circle
@@ -172,7 +173,7 @@ export function VelocityChart({ stats }: VelocityChartProps) {
                     r="3.8"
                     fill="#f87171"
                   >
-                    <title>{`${bucket.flagged_count} vandalism flag(s) at ${bucket.label} UTC`}</title>
+                    <title>{`${bucket.flagged_count} vandalism flag(s) at ${formatMinuteLabel(bucket.minute_ts)}`}</title>
                   </circle>
                 )}
                 <text
@@ -181,7 +182,7 @@ export function VelocityChart({ stats }: VelocityChartProps) {
                   textAnchor="middle"
                   className="wp-chart-axis-label"
                 >
-                  {bucket.label}
+                  {formatMinuteLabel(bucket.minute_ts)}
                 </text>
               </g>
             ))}

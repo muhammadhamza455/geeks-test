@@ -35,7 +35,7 @@ export function formatClockTime(unixSeconds: number): string {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   });
 }
 
@@ -53,4 +53,13 @@ export function formatProviderBadge(provider: string): string {
     return "Local Heuristic AI";
   }
   return `LLM · ${provider}`;
+}
+
+/** Format a minute bucket (unix seconds) as local HH:MM so the chart matches feed timestamps. */
+export function formatMinuteLabel(unixSeconds: number): string {
+  return new Date(unixSeconds * 1000).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
 }

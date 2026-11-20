@@ -61,27 +61,27 @@ export function useWikiPulse(): UseWikiPulseResult {
   filterRef.current = wikiFilter;
 
   const togglePaused = useCallback(() => {
-    setPaused((prev) => {
-      const next = !prev;
-      if (!next && pausedQueueRef.current.length > 0) {
-        const queued = pausedQueueRef.current;
-        pausedQueueRef.current = [];
-        setQueuedCount(0);
-        setEdits((current) => {
-          const seen = new Set<string>();
-          const merged: WikiEdit[] = [];
-          for (const item of [...queued, ...current]) {
-            if (!seen.has(item.id)) {
-              seen.add(item.id);
-              merged.push(item);
-            }
-            if (merged.length >= MAX_FEED_ITEMS) break;
+    // Side effects stay outside the state updater (StrictMode double-invokes updaters).
+    const next = !pausedRef.current;
+    pausedRef.current = next;
+    setPaused(next);
+    if (!next && pausedQueueRef.current.length > 0) {
+      const queued = pausedQueueRef.current;
+      pausedQueueRef.current = [];
+      setQueuedCount(0);
+      setEdits((current) => {
+        const seen = new Set<string>();
+        const merged: WikiEdit[] = [];
+        for (const item of [...queued, ...current]) {
+          if (!seen.has(item.id)) {
+            seen.add(item.id);
+            merged.push(item);
           }
-          return merged;
-        });
-      }
-      return next;
-    });
+          if (merged.length >= MAX_FEED_ITEMS) break;
+        }
+        return merged;
+      });
+    }
   }, []);
 
   const setWikiFilter = useCallback((nextWiki: string | null) => {
@@ -162,9 +162,14 @@ export function useWikiPulse(): UseWikiPulseResult {
       if (unmounted) return;
       cleanupTimers();
 
-      const wsUrl = buildWsUrl(filterRef.current);
-      const ws = new WebSocket(wsUrl);
+      const urlFilter = filterRef.current;
+      const ws = new WebSocket(buildWsUrl(urlFilter));
       wsRef.current = ws;
+
+      // A message can be in flight for a filter the user has just left (e.g. a broadcast
+      // that raced a filter change); ignore anything not addressed to the current view.
+      const isForCurrentFilter = (wiki: string | null | undefined) =>
+        (wiki ?? null) === filterRef.current;
 
       ws.onopen = () => {
         if (unmounted) {
@@ -174,6 +179,12 @@ export function useWikiPulse(): UseWikiPulseResult {
         reconnectAttemptRef.current = 0;
         setConnectionState("connected");
         setErrorBanner(null);
+
+        // The filter may have changed while this socket was still connecting (set_filter
+        // could not be sent then), so re-sync the server with the current selection.
+        if (filterRef.current !== urlFilter) {
+          ws.send(JSON.stringify({ type: "set_filter", wiki: filterRef.current }));
+        }
 
         pingTimerRef.current = window.setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
@@ -192,6 +203,7 @@ export function useWikiPulse(): UseWikiPulseResult {
         }
 
         if (msg.type === "snapshot") {
+          if (!isForCurrentFilter(msg.stats.wiki_filter)) return;
           pausedQueueRef.current = [];
           setQueuedCount(0);
           setStats(msg.stats);
@@ -203,8 +215,10 @@ export function useWikiPulse(): UseWikiPulseResult {
           }
           setIsRefreshingPulse(false);
         } else if (msg.type === "stats") {
+          if (!isForCurrentFilter(msg.stats.wiki_filter)) return;
           setStats(msg.stats);
         } else if (msg.type === "pulse") {
+          if (!isForCurrentFilter(msg.pulse.wiki_filter)) return;
           setPulse(msg.pulse);
           if (pulseTimeoutRef.current !== null) {
             window.clearTimeout(pulseTimeoutRef.current);
@@ -212,6 +226,7 @@ export function useWikiPulse(): UseWikiPulseResult {
           }
           setIsRefreshingPulse(false);
         } else if (msg.type === "edit") {
+          if (filterRef.current && msg.edit.wiki !== filterRef.current) return;
           if (pausedRef.current) {
             pausedQueueRef.current = [msg.edit, ...pausedQueueRef.current].slice(0, MAX_FEED_ITEMS);
             setQueuedCount(pausedQueueRef.current.length);
@@ -240,8 +255,10 @@ export function useWikiPulse(): UseWikiPulseResult {
       };
 
       ws.onclose = () => {
+        // A stale socket (e.g. from StrictMode's mount/unmount/mount) must not clear timers
+        // that now belong to the current connection.
+        if (unmounted || wsRef.current !== ws) return;
         cleanupTimers();
-        if (unmounted) return;
         setConnectionState("reconnecting");
         const attempt = reconnectAttemptRef.current + 1;
         reconnectAttemptRef.current = attempt;
@@ -255,9 +272,12 @@ export function useWikiPulse(): UseWikiPulseResult {
     return () => {
       unmounted = true;
       cleanupTimers();
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+      const ws = wsRef.current;
+      wsRef.current = null;
+      // Closing a socket that is still CONNECTING logs a browser console error; onopen
+      // already closes it once the handshake completes because `unmounted` is set.
+      if (ws && ws.readyState !== WebSocket.CONNECTING) {
+        ws.close();
       }
     };
   }, []);

@@ -45,6 +45,16 @@ This document records how I used AI coding tools while designing, building, and 
 
 ---
 
+## Example 5: Final Pre-Submission Review (Silent LLM Fallback)
+
+- **What I asked**: *"Review the whole project against the brief in detail, make sure everything builds and runs without errors, and fix anything missing or broken."*
+- **What I kept**: The review's fixes: a split LLM budget so a burst of suspicious live edits can't starve the Pulse summary, keeping the last AI Pulse briefing for up to 2 minutes when a refresh call fails (instead of the card flipping to the heuristic text), tolerant parsing so one malformed upstream event can't drop the SSE connection, a per-edit guard so one failing edit can't stop ingestion, and React StrictMode-safe WebSocket cleanup in `useWikiPulse`. I also had a second, independent AI reviewer read the code cold; it found races I had missed (an in-flight LLM Pulse call repopulating the cache with old-mode data after a Live/Replay switch, a filter snapshot wiping edits that arrived during the LLM call, and replay with a 0s interval starving the event loop). I verified each with a probe script before fixing it and added a regression test for each.
+- **What I changed / rejected and why**:
+  - **Where the AI was wrong**: The Anthropic default that AI had generated earlier, `claude-3-5-haiku-latest`, had been retired, and the request also sent `temperature`, which current Claude models reject. Every Anthropic call would have failed, and because failures fall back to heuristics by design, the dashboard would have looked healthy while never using the LLM. Nothing in the test suite caught it because only OpenAI was mocked. I switched the default to `claude-haiku-5-5`, dropped `temperature` for Anthropic, gave Anthropic and Gemini enough output-token headroom for models that think by default, and added a mocked Anthropic request-shape test.
+  - **Rejected**: The suggestion to move the LLM layer onto the official Anthropic SDK. The service deliberately supports OpenAI, Anthropic and Gemini over one `httpx` client, and adding one vendor SDK would make the providers asymmetric for little gain in a take-home.
+
+---
+
 ## What I Chose NOT to Use AI For
 
 - **Evaluating live Wikimedia SSE payload quirks**: I inspected raw live events directly from `https://stream.wikimedia.org/v2/stream/recentchange` to verify real field shapes (`meta.id`, `notify_url`, `:ok` heartbeats, `type` values, and `~2026-...` temp accounts) rather than trusting AI's memory of the schema.
