@@ -40,6 +40,16 @@ def is_anonymous_editor(username: str) -> bool:
         return False
 
 
+def _safe_http_url(candidate: Any) -> Optional[str]:
+    """Allow only http(s) URLs to prevent unsafe href schemes."""
+    if not candidate:
+        return None
+    text = str(candidate).strip()
+    if text.startswith("https://") or text.startswith("http://"):
+        return text
+    return None
+
+
 def parse_raw_event(
     raw: dict[str, Any],
     *,
@@ -61,21 +71,22 @@ def parse_raw_event(
         return None
 
     meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
-    server_url = str(raw.get("server_url") or f"https://{raw.get('server_name', 'en.wikipedia.org')}").rstrip("/")
-    server_name = str(raw.get("server_name") or "")
+    server_name = str(raw.get("server_name") or "").strip()
+    raw_server_url = _safe_http_url(raw.get("server_url"))
+    server_url = (raw_server_url or f"https://{server_name or 'en.wikipedia.org'}").rstrip("/")
 
-    title_url = str(raw.get("title_url") or meta.get("uri") or "")
+    title_url = _safe_http_url(raw.get("title_url")) or _safe_http_url(meta.get("uri"))
     if not title_url:
         encoded_title = quote(title.replace(" ", "_"), safe="/:")
         title_url = f"{server_url}/wiki/{encoded_title}"
 
-    diff_url = raw.get("notify_url")
+    diff_url = _safe_http_url(raw.get("notify_url"))
     if not diff_url:
         revision = raw.get("revision") if isinstance(raw.get("revision"), dict) else {}
         new_rev = revision.get("new")
         old_rev = revision.get("old")
         if new_rev and old_rev:
-            script_path = raw.get("server_script_path", "/w")
+            script_path = str(raw.get("server_script_path") or "/w")
             diff_url = f"{server_url}{script_path}/index.php?diff={new_rev}&oldid={old_rev}"
 
     length_obj = raw.get("length") if isinstance(raw.get("length"), dict) else {}
@@ -94,18 +105,20 @@ def parse_raw_event(
     base_id = str(meta.get("id") or raw.get("id") or f"{wiki}-{title}-{int(parsed_ts * 1000)}")
     event_id = f"{base_id}{id_suffix}" if id_suffix else base_id
 
-    user = str(raw.get("user") or "Anonymous")
+    raw_user = str(raw.get("user") or "").strip()
     is_bot = bool(raw.get("bot", False))
+    is_anon = False if is_bot else is_anonymous_editor(raw_user)
+    user = raw_user or "Anonymous"
 
     return WikiEdit(
         id=event_id,
         wiki=wiki,
         title=title,
         title_url=title_url,
-        diff_url=str(diff_url) if diff_url else None,
+        diff_url=diff_url,
         user=user,
         is_bot=is_bot,
-        is_anon=False if is_bot else is_anonymous_editor(user),
+        is_anon=is_anon,
         is_minor=bool(raw.get("minor", False)),
         is_new=(event_type == "new"),
         namespace=int(raw.get("namespace") or 0),

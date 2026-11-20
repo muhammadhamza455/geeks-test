@@ -45,6 +45,21 @@ _BENIGN_DELETE_RE = re.compile(
 _ANTI_VANDAL_USERS = {"cluebot ng", "salebot", "huggle", "swviewer", "antivandal"}
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Safely coerce LLM boolean fields (handling string 'true'/'false')."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1"):
+            return True
+        if lowered in ("false", "no", "0"):
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 def _extract_json_object(raw_text: str) -> Optional[dict[str, Any]]:
     """Parse a JSON object from LLM text output, handling markdown code fences."""
     text = raw_text.strip()
@@ -354,7 +369,7 @@ class AIService:
         if not parsed:
             return initial
 
-        flagged = bool(parsed.get("is_vandalism", initial.flagged))
+        flagged = _coerce_bool(parsed.get("is_vandalism"), initial.flagged)
         severity = str(parsed.get("severity", initial.severity if flagged else "none")).lower()
         if severity not in ("none", "low", "medium", "high"):
             severity = "medium" if flagged else "none"

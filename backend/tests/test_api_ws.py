@@ -107,7 +107,11 @@ def test_websocket_snapshot_filter_and_ping():
             assert pulse_msg["type"] == "pulse"
             assert "Beta" in pulse_msg["pulse"]["summary"]
 
-            # Ping / pong keepalive
+            # Malformed or non-dict frames should be ignored without closing the socket
+            ws.send_text("not-json")
+            ws.send_json(["unexpected", "array"])
+
+            # Ping / pong keepalive still succeeds
             ws.send_json({"type": "ping"})
             pong = ws.receive_json()
             assert pong == {"type": "pong"}

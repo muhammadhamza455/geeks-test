@@ -74,8 +74,9 @@ class WikiPulseRuntime:
         try:
             refined = await self.ai.verify_vandalism_with_llm(edit, initial)
             if refined != initial:
-                self.stats.update_vandalism(edit.id, refined)
-                await self.ws_manager.broadcast_vandalism_update(edit.id, edit.wiki, refined)
+                updated = self.stats.update_vandalism(edit.id, refined)
+                if updated is not None:
+                    await self.ws_manager.broadcast_vandalism_update(edit.id, edit.wiki, refined)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -170,7 +171,23 @@ class WikiPulseRuntime:
         if new_mode == "replay" and not self.settings.sample_file.exists():
             raise FileNotFoundError(f"Sample file not found: {self.settings.sample_file}")
         async with self._mode_lock:
+            if (
+                new_mode == self.stream_mode
+                and self._stream_task is not None
+                and not self._stream_task.done()
+            ):
+                return
             await self.stop_stream_task()
+            # Cancel any in-flight Stage-2 LLM checks from the previous stream mode
+            pending_bg = list(self._bg_tasks)
+            for task in pending_bg:
+                task.cancel()
+            for task in pending_bg:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._bg_tasks.clear()
             self.stream_mode = new_mode
             self.stats.reset()
             self.ai.clear_cache()
@@ -297,7 +314,13 @@ def create_app(
             await runtime.ws_manager.send_snapshot(websocket, stats, recent, pulse)
 
             while True:
-                message = await websocket.receive_json()
+                try:
+                    message = await websocket.receive_json()
+                except ValueError:
+                    # Ignore malformed non-JSON client frames without dropping the socket
+                    continue
+                if not isinstance(message, dict):
+                    continue
                 msg_type = message.get("type")
 
                 if msg_type == "set_filter":

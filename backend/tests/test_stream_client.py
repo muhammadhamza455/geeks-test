@@ -53,6 +53,25 @@ def test_parse_raw_event_filters_and_normalizes():
     assert edit.diff_url == "https://en.wikipedia.org/w/index.php?diff=11&oldid=10"
 
 
+def test_parse_raw_event_handles_empty_user_none_server_and_unsafe_urls():
+    raw = {
+        "type": "edit",
+        "wiki": "enwiki",
+        "title": "Test Page",
+        "user": "",
+        "server_name": None,
+        "title_url": "javascript:alert(1)",
+        "notify_url": "javascript:evil()",
+        "timestamp": 1700000200,
+    }
+    edit = parse_raw_event(raw)
+    assert edit is not None
+    assert edit.user == "Anonymous"
+    assert edit.is_anon is True
+    assert edit.title_url == "https://en.wikipedia.org/wiki/Test_Page"
+    assert edit.diff_url is None
+
+
 @pytest.mark.asyncio
 async def test_parse_sse_lines_handles_heartbeats_multiline_and_bad_json():
     sample_lines = [

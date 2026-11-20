@@ -7,6 +7,7 @@ import pytest
 from app.ai_service import (
     AIService,
     SlidingRateLimiter,
+    _coerce_bool,
     _extract_json_object,
     heuristic_vandalism_check,
 )
@@ -113,6 +114,15 @@ def test_extract_json_object_handles_fences_and_noise():
     assert _extract_json_object('```json\n{"a": 2}\n```') == {"a": 2}
     assert _extract_json_object('Sure! Here is JSON: {"ok": true} thanks') == {"ok": True}
     assert _extract_json_object("not json at all") is None
+
+
+def test_coerce_bool_handles_string_false():
+    assert _coerce_bool(True, False) is True
+    assert _coerce_bool(False, True) is False
+    assert _coerce_bool("false", True) is False
+    assert _coerce_bool("no", True) is False
+    assert _coerce_bool("true", False) is True
+    assert _coerce_bool("unknown", True) is True
 
 
 def test_rate_limiter_enforces_budget():
