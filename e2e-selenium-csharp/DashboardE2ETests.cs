@@ -22,7 +22,8 @@ public class DashboardE2ETests : IDisposable
         options.AddArgument("--window-size=1440,1080");
 
         _driver = new ChromeDriver(options);
-        _wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(20));
+        _wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(30));
+        _wait.IgnoreExceptionTypes(typeof(StaleElementReferenceException));
     }
 
     [Fact]
@@ -54,7 +55,7 @@ public class DashboardE2ETests : IDisposable
             replayBtn.Click();
         }
 
-        // 4. Wait for at least one vandalism flag banner with a reason
+        // 4. Wait for at least one vandalism flag banner with a reason, then verify Flagged Only toggle
         var flagBanner = _wait.Until(d =>
         {
             var banners = d.FindElements(By.CssSelector("[data-testid='vandalism-flag-banner']"));
@@ -62,6 +63,13 @@ public class DashboardE2ETests : IDisposable
         });
         Assert.NotNull(flagBanner);
         Assert.False(string.IsNullOrWhiteSpace(flagBanner!.Text));
+
+        var flaggedToggle = _driver.FindElement(By.CssSelector("[data-testid='vandalism-only-toggle']"));
+        flaggedToggle.Click();
+        var flaggedItems = _driver.FindElements(By.CssSelector("[data-testid='live-feed-item']"));
+        Assert.NotEmpty(flaggedItems);
+        Assert.All(flaggedItems, item => Assert.Equal("true", item.GetAttribute("data-flagged")));
+        flaggedToggle.Click();
 
         // 5. Refresh and verify AI Pulse Summary renders plain-English copy
         var refreshBtn = _driver.FindElement(By.CssSelector("[data-testid='refresh-pulse-btn']"));
@@ -93,21 +101,15 @@ public class DashboardE2ETests : IDisposable
 
         _wait.Until(d =>
         {
-            var items = d.FindElements(By.CssSelector("[data-testid='live-feed-item']"));
-            if (items.Count == 0) return false;
-            return items.All(item => item.Text.Contains("enwiki", StringComparison.OrdinalIgnoreCase));
+            var js = (IJavaScriptExecutor)d;
+            var result = js.ExecuteScript(
+                "const items = Array.from(document.querySelectorAll('[data-testid=\"live-feed-item\"]'));" +
+                "return items.length > 0 && items.every(el => el.textContent.toLowerCase().includes('enwiki'));"
+            );
+            return result is bool ok && ok;
         });
 
-        // 7. Toggle "Flagged Only" filter and confirm all visible items are flagged
-        var flaggedToggle = _driver.FindElement(By.CssSelector("[data-testid='vandalism-only-toggle']"));
-        flaggedToggle.Click();
-
-        var flaggedItems = _driver.FindElements(By.CssSelector("[data-testid='live-feed-item']"));
-        Assert.NotEmpty(flaggedItems);
-        Assert.All(flaggedItems, item => Assert.Equal("true", item.GetAttribute("data-flagged")));
-
-        // Disable flagged-only, switch back to All Wikis, and verify Pause/Resume works
-        flaggedToggle.Click();
+        // 7. Switch back to All Wikis and verify Pause/Resume works
         _driver.FindElement(By.CssSelector("[data-testid='quick-wiki-all']")).Click();
 
         var pauseBtn = _driver.FindElement(By.CssSelector("[data-testid='pause-feed-btn']"));

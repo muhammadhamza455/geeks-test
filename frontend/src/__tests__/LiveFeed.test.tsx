@@ -130,4 +130,43 @@ describe("LiveFeed", () => {
     await user.click(screen.getByText("frwiki"));
     expect(onSelectWiki).toHaveBeenCalledWith("frwiki");
   });
+
+  it("renders XSS payloads from sample_events.jsonl as inert text, never as markup", () => {
+    const payloads = [
+      '<script>alert("xss")</script> Updated description of the article.',
+      '<img src=x onerror=alert("xss")> Minor formatting changes.',
+    ];
+    const hostile: WikiEdit[] = payloads.map((comment, i) => ({
+      ...sampleEdits[1],
+      id: `xss-${i}`,
+      title: `<b onmouseover=alert(1)>Title ${i}</b>`,
+      user: `<svg onload=alert(1)>`,
+      comment,
+      vandalism: {
+        flagged: true,
+        severity: "high",
+        confidence: 0.93,
+        reason: "Suspicious HTML/script injection payload in edit summary.",
+        source: "heuristic",
+      },
+    }));
+    const { container } = render(
+      <LiveFeed
+        edits={hostile}
+        wikiFilter={null}
+        paused={false}
+        queuedCount={0}
+        onTogglePaused={() => {}}
+        onSelectWiki={() => {}}
+      />
+    );
+
+    // The payloads are shown literally...
+    expect(screen.getByText(payloads[0])).toBeInTheDocument();
+    expect(screen.getByText(payloads[1])).toBeInTheDocument();
+    // ...and none of them became real elements or event handlers.
+    expect(container.querySelector("script, img, svg[onload], b[onmouseover], [onerror]")).toBeNull();
+    expect(screen.getAllByTestId("vandalism-flag-banner")).toHaveLength(2);
+  });
 });
+

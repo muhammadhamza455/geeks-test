@@ -53,7 +53,7 @@ class Settings:
         )
     )
     replay_interval_seconds: float = field(
-        default_factory=lambda: max(0.0, _env_float("WIKIPULSE_REPLAY_INTERVAL_SECONDS", 0.35))
+        default_factory=lambda: max(0.0, _env_float("WIKIPULSE_REPLAY_INTERVAL_SECONDS", 0.08))
     )
     stream_url: str = field(
         default_factory=lambda: os.getenv(

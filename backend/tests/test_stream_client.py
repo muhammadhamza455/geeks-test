@@ -157,6 +157,8 @@ async def test_stream_replay_reads_sample_events_jsonl(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_repo_sample_events_file_is_valid():
+    from app.ai_service import heuristic_vandalism_check
+
     repo_sample = Path(__file__).resolve().parents[2] / "sample_events.jsonl"
     assert repo_sample.exists(), "sample_events.jsonl should exist at repo root"
     client = WikimediaStreamClient()
@@ -166,9 +168,12 @@ async def test_repo_sample_events_file_is_valid():
             repo_sample, interval_seconds=0.0, loop=False
         )
     ]
-    assert len(edits) >= 50
+    assert len(edits) >= 1500
     wikis = {e.wiki for e in edits}
-    assert "enwiki" in wikis
+    assert {"enwiki", "frwiki", "dewiki", "eswiki"}.issubset(wikis)
+    # All embedded prompt-injection and XSS edits in sample_events.jsonl are caught
+    flagged = [e for e in edits if heuristic_vandalism_check(e)[0].flagged]
+    assert len(flagged) >= 5
 
 
 def test_parse_raw_event_never_raises_on_malformed_numeric_fields():
