@@ -21,6 +21,7 @@ from app.models import (
     VandalismAssessment,
     WikiCount,
     WikiEdit,
+    normalize_wiki_filter,
 )
 
 
@@ -119,10 +120,47 @@ class RollingStats:
         wiki_filter: Optional[str] = None,
         limit: int = 60,
     ) -> list[WikiEdit]:
-        """Return most recent edits (newest first), optionally filtered by wiki."""
-        normalized = wiki_filter.strip() if wiki_filter else None
+        """Return most recent edits (newest first), optionally filtered by wiki.
+
+        The global ring buffer holds only ~10 seconds of live traffic, so for a wiki filter
+        we search the full 5-minute window first; otherwise a smaller wiki's feed would be
+        empty while its Top 10 table lists dozens of edits.
+        """
+        normalized = normalize_wiki_filter(wiki_filter)
+        if normalized is None:
+            return list(reversed(self._recent))[:limit]
+
         results: list[WikiEdit] = []
-        for edit in reversed(self._recent):
+        seen: set[str] = set()
+        for source in (self._window_5m, self._recent):
+            for edit in reversed(source):
+                if edit.wiki != normalized or edit.id in seen:
+                    continue
+                seen.add(edit.id)
+                results.append(edit)
+                if len(results) >= limit:
+                    return results
+        return results
+
+    def get_flagged_edits(
+        self,
+        wiki_filter: Optional[str] = None,
+        limit: int = 5,
+        now: Optional[float] = None,
+    ) -> list[WikiEdit]:
+        """Return the newest vandalism-flagged edits in the 5-minute window (newest first).
+
+        The recent-edits ring buffer only spans a few seconds on the busy live stream, so
+        Pulse summaries use this to see flags from the whole window.
+        """
+        normalized = normalize_wiki_filter(wiki_filter)
+        cutoff = (now if now is not None else time.time()) - self.WINDOW_5M_SECONDS
+        results: list[WikiEdit] = []
+        for edit in reversed(self._window_5m):
+            if edit.timestamp < cutoff:
+                continue
+            if not edit.vandalism.flagged:
+                continue
             if normalized and edit.wiki != normalized:
                 continue
             results.append(edit)
@@ -143,7 +181,7 @@ class RollingStats:
         current = now if now is not None else time.time()
         self.prune(now=current)
 
-        normalized = wiki_filter.strip() if wiki_filter else None
+        normalized = normalize_wiki_filter(wiki_filter)
         cutoff_1m = current - self.WINDOW_1M_SECONDS
         cutoff_5m = current - self.WINDOW_5M_SECONDS
 

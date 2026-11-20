@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+def normalize_wiki_filter(value: Any) -> Optional[str]:
+    """Normalize a client-supplied wiki filter: non-strings and blank strings mean 'all wikis'."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 class VandalismAssessment(BaseModel):

@@ -169,3 +169,61 @@ async def test_repo_sample_events_file_is_valid():
     assert len(edits) >= 50
     wikis = {e.wiki for e in edits}
     assert "enwiki" in wikis
+
+
+def test_parse_raw_event_never_raises_on_malformed_numeric_fields():
+    raw = {
+        "type": "edit",
+        "wiki": "enwiki",
+        "title": "Odd Event",
+        "user": "SomeUser",
+        "namespace": "not-a-number",
+        "length": {"old": "abc", "new": None},
+        "timestamp": "garbage",
+    }
+    edit = parse_raw_event(raw)
+    assert edit is not None
+    assert edit.namespace == 0
+    assert edit.old_length == 0 and edit.new_length == 0
+    # Unexpected shapes are skipped rather than raising
+    assert parse_raw_event({"type": "edit", "wiki": "enwiki", "title": "X", "meta": {"id": ["bad"]}, "length": []}) is not None
+
+
+@pytest.mark.asyncio
+async def test_replay_with_zero_interval_keeps_event_loop_responsive(tmp_path):
+    import asyncio
+
+    sample = tmp_path / "s.jsonl"
+    sample.write_text(
+        json.dumps({"type": "edit", "wiki": "enwiki", "title": "T", "meta": {"id": "1"}}) + "\n",
+        encoding="utf-8",
+    )
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0)
+            ticks += 1
+
+    ticker_task = asyncio.create_task(ticker())
+    client = WikimediaStreamClient()
+    count = 0
+    async for _ in client.stream_replay(sample, interval_seconds=0, loop=True):
+        count += 1
+        if count >= 200:
+            break
+    ticker_task.cancel()
+    assert ticks > 0  # other tasks got scheduled while replay was flooding
+
+
+@pytest.mark.asyncio
+async def test_replay_stops_when_file_has_no_edit_events(tmp_path):
+    sample = tmp_path / "logs_only.jsonl"
+    sample.write_text(
+        "\n".join(json.dumps({"type": "log", "wiki": "enwiki", "title": f"L{i}"}) for i in range(3)),
+        encoding="utf-8",
+    )
+    client = WikimediaStreamClient()
+    edits = [e async for e in client.stream_replay(sample, interval_seconds=0, loop=True)]
+    assert edits == []  # terminates instead of spinning forever

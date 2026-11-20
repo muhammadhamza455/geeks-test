@@ -7,7 +7,13 @@ from typing import Any, Optional
 
 from fastapi import WebSocket
 
-from app.models import DashboardStats, PulseSummary, VandalismAssessment, WikiEdit
+from app.models import (
+    DashboardStats,
+    PulseSummary,
+    VandalismAssessment,
+    WikiEdit,
+    normalize_wiki_filter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +36,7 @@ class ConnectionManager:
 
     async def connect(self, websocket: WebSocket, wiki_filter: Optional[str] = None) -> None:
         await websocket.accept()
-        normalized = wiki_filter.strip() if wiki_filter else None
+        normalized = normalize_wiki_filter(wiki_filter)
         self._clients[websocket] = normalized
         logger.info(
             "WebSocket connected (filter=%s, total=%d)", normalized or "ALL", len(self._clients)
@@ -42,7 +48,7 @@ class ConnectionManager:
             logger.info("WebSocket disconnected (total=%d)", len(self._clients))
 
     def set_filter(self, websocket: WebSocket, wiki_filter: Optional[str]) -> Optional[str]:
-        normalized = wiki_filter.strip() if wiki_filter else None
+        normalized = normalize_wiki_filter(wiki_filter)
         if websocket in self._clients:
             self._clients[websocket] = normalized
         return normalized

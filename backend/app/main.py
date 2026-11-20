@@ -13,7 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.ai_service import AIService, heuristic_vandalism_check
 from app.config import Settings
-from app.models import DashboardStats, ModeSwitchRequest, PulseSummary, WikiEdit
+from app.models import (
+    DashboardStats,
+    ModeSwitchRequest,
+    PulseSummary,
+    WikiEdit,
+    normalize_wiki_filter,
+)
 from app.rolling_stats import RollingStats
 from app.ws_manager import ConnectionManager
 from stream_client import WikimediaStreamClient
@@ -44,6 +50,8 @@ class WikiPulseRuntime:
         self._bg_tasks: set[asyncio.Task[None]] = set()
         self._mode_lock: asyncio.Lock = asyncio.Lock()
         self._last_pulse_processed: int = -1
+        # Bumped on every live/replay switch so in-flight Pulse work from the old mode is discarded
+        self._mode_epoch: int = 0
 
     def _set_connected(self, connected: bool) -> None:
         self.stream_connected = connected
@@ -55,6 +63,37 @@ class WikiPulseRuntime:
             stream_connected=self.stream_connected,
             llm_provider=self.ai.provider_label,
         )
+
+    async def generate_pulse(
+        self, wiki_filter: Optional[str] = None, *, force: bool = False
+    ) -> PulseSummary:
+        """Build a Pulse summary from current stats, recent edits, and flagged edits in the 5m window.
+
+        If the stream mode switches while a (slow) LLM call is in flight, the result describes
+        the old mode's data, so it is discarded and regenerated from the fresh state.
+        """
+        while True:
+            epoch = self._mode_epoch
+            stats = self.current_stats(wiki_filter=wiki_filter)
+            context = self.stats.get_recent_edits(wiki_filter=wiki_filter, limit=40)
+            seen = {edit.id for edit in context}
+            context.extend(
+                edit
+                for edit in self.stats.get_flagged_edits(wiki_filter=wiki_filter, limit=5)
+                if edit.id not in seen
+            )
+            pulse = await self.ai.generate_pulse_summary(stats, context, force=force)
+            if epoch == self._mode_epoch:
+                return pulse
+
+    async def send_fresh_snapshot(self, websocket: WebSocket, wiki_filter: Optional[str]) -> None:
+        """Send a full snapshot. The slow Pulse step runs first and stats/edits are captured
+        afterwards, so edits streamed to the client during the LLM call are not wiped out by
+        an older edit list."""
+        pulse = await self.generate_pulse(wiki_filter)
+        stats = self.current_stats(wiki_filter=wiki_filter)
+        recent = self.stats.get_recent_edits(wiki_filter=wiki_filter, limit=60)
+        await self.ws_manager.send_snapshot(websocket, stats, recent, pulse)
 
     async def process_edit(self, edit: WikiEdit) -> WikiEdit:
         """Run stage-1 vandalism screening, update rolling stats, broadcast, and queue LLM verify."""
@@ -104,7 +143,13 @@ class WikiPulseRuntime:
             async for edit in iterator:
                 if self._stream_stop.is_set():
                     break
-                await self.process_edit(edit)
+                try:
+                    await self.process_edit(edit)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # One bad edit must never stall ingestion for the rest of the demo
+                    logger.exception("Failed to process edit %s; continuing", edit.id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -136,9 +181,7 @@ class WikiPulseRuntime:
                     continue
                 self._last_pulse_processed = self.stats.total_processed
                 for wiki_filter in self.ws_manager.active_filters():
-                    stats = self.current_stats(wiki_filter=wiki_filter)
-                    recent = self.stats.get_recent_edits(wiki_filter=wiki_filter, limit=40)
-                    pulse = await self.ai.generate_pulse_summary(stats, recent, force=False)
+                    pulse = await self.generate_pulse(wiki_filter)
                     await self.ws_manager.broadcast_pulse_for_filter(wiki_filter, pulse)
         except asyncio.CancelledError:
             raise
@@ -191,14 +234,12 @@ class WikiPulseRuntime:
             self.stream_mode = new_mode
             self.stats.reset()
             self.ai.clear_cache()
+            self._mode_epoch += 1
             self._last_pulse_processed = -1
             await self.start_stream_task()
             # Push a clean snapshot to all connected clients so old-mode items clear immediately
             for ws, wiki_filter in self.ws_manager.iter_clients():
-                f_stats = self.current_stats(wiki_filter=wiki_filter)
-                f_recent = self.stats.get_recent_edits(wiki_filter=wiki_filter, limit=60)
-                f_pulse = await self.ai.generate_pulse_summary(f_stats, f_recent, force=False)
-                await self.ws_manager.send_snapshot(ws, f_stats, f_recent, f_pulse)
+                await self.send_fresh_snapshot(ws, wiki_filter)
 
     async def stop(self) -> None:
         await self.stop_stream_task()
@@ -274,17 +315,13 @@ def create_app(
 
     @app.get("/api/pulse", response_model=PulseSummary)
     async def get_pulse(wiki: Optional[str] = Query(default=None)):
-        stats = runtime.current_stats(wiki_filter=wiki)
-        recent = runtime.stats.get_recent_edits(wiki_filter=wiki, limit=40)
-        return await runtime.ai.generate_pulse_summary(stats, recent, force=False)
+        return await runtime.generate_pulse(wiki)
 
     @app.post("/api/pulse/refresh", response_model=PulseSummary)
     async def refresh_pulse(wiki: Optional[str] = Query(default=None)):
-        stats = runtime.current_stats(wiki_filter=wiki)
-        recent = runtime.stats.get_recent_edits(wiki_filter=wiki, limit=40)
-        pulse = await runtime.ai.generate_pulse_summary(stats, recent, force=True)
+        pulse = await runtime.generate_pulse(wiki, force=True)
         await runtime.ws_manager.broadcast_pulse_for_filter(
-            wiki.strip() if wiki else None, pulse
+            normalize_wiki_filter(wiki), pulse
         )
         return pulse
 
@@ -304,14 +341,11 @@ def create_app(
         websocket: WebSocket,
         wiki: Optional[str] = Query(default=None),
     ):
-        normalized = wiki.strip() if wiki else None
+        normalized = normalize_wiki_filter(wiki)
         await runtime.ws_manager.connect(websocket, wiki_filter=normalized)
         try:
             # Immediately push initial snapshot so the dashboard populates without waiting
-            stats = runtime.current_stats(wiki_filter=normalized)
-            recent = runtime.stats.get_recent_edits(wiki_filter=normalized, limit=60)
-            pulse = await runtime.ai.generate_pulse_summary(stats, recent, force=False)
-            await runtime.ws_manager.send_snapshot(websocket, stats, recent, pulse)
+            await runtime.send_fresh_snapshot(websocket, normalized)
 
             while True:
                 try:
@@ -325,20 +359,11 @@ def create_app(
 
                 if msg_type == "set_filter":
                     new_filter = runtime.ws_manager.set_filter(websocket, message.get("wiki"))
-                    f_stats = runtime.current_stats(wiki_filter=new_filter)
-                    f_recent = runtime.stats.get_recent_edits(wiki_filter=new_filter, limit=60)
-                    f_pulse = await runtime.ai.generate_pulse_summary(
-                        f_stats, f_recent, force=False
-                    )
-                    await runtime.ws_manager.send_snapshot(websocket, f_stats, f_recent, f_pulse)
+                    await runtime.send_fresh_snapshot(websocket, new_filter)
 
                 elif msg_type == "refresh_pulse":
                     cur_filter = runtime.ws_manager.get_filter(websocket)
-                    f_stats = runtime.current_stats(wiki_filter=cur_filter)
-                    f_recent = runtime.stats.get_recent_edits(wiki_filter=cur_filter, limit=40)
-                    f_pulse = await runtime.ai.generate_pulse_summary(
-                        f_stats, f_recent, force=True
-                    )
+                    f_pulse = await runtime.generate_pulse(cur_filter, force=True)
                     await runtime.ws_manager.send_json(
                         websocket,
                         {"type": "pulse", "pulse": f_pulse.model_dump(mode="json")},

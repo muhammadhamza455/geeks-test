@@ -50,6 +50,14 @@ def _safe_http_url(candidate: Any) -> Optional[str]:
     return None
 
 
+def _safe_int(value: Any) -> int:
+    """Coerce a possibly-missing or malformed numeric field to int (0 on failure)."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def parse_raw_event(
     raw: dict[str, Any],
     *,
@@ -59,8 +67,22 @@ def parse_raw_event(
     """Convert a raw Wikimedia recentchange JSON dict into a WikiEdit.
 
     Returns None for non-edit events (e.g. 'categorize', 'log', 'external') or
-    malformed payloads missing required fields.
+    malformed payloads missing required fields. Never raises on bad input, so a
+    single odd upstream event cannot drop the live SSE connection.
     """
+    try:
+        return _parse_raw_event(raw, override_timestamp=override_timestamp, id_suffix=id_suffix)
+    except (TypeError, ValueError, AttributeError):  # pydantic ValidationError is a ValueError
+        logger.debug("Skipping malformed recentchange event: %r", raw.get("meta"))
+        return None
+
+
+def _parse_raw_event(
+    raw: dict[str, Any],
+    *,
+    override_timestamp: Optional[float],
+    id_suffix: str,
+) -> Optional[WikiEdit]:
     event_type = raw.get("type")
     if event_type not in ("edit", "new"):
         return None
@@ -90,8 +112,8 @@ def parse_raw_event(
             diff_url = f"{server_url}{script_path}/index.php?diff={new_rev}&oldid={old_rev}"
 
     length_obj = raw.get("length") if isinstance(raw.get("length"), dict) else {}
-    old_length = int(length_obj.get("old") or 0)
-    new_length = int(length_obj.get("new") or 0)
+    old_length = _safe_int(length_obj.get("old"))
+    new_length = _safe_int(length_obj.get("new"))
     byte_delta = new_length - old_length
 
     raw_ts = raw.get("timestamp")
@@ -121,7 +143,7 @@ def parse_raw_event(
         is_anon=is_anon,
         is_minor=bool(raw.get("minor", False)),
         is_new=(event_type == "new"),
-        namespace=int(raw.get("namespace") or 0),
+        namespace=_safe_int(raw.get("namespace")),
         comment=str(raw.get("comment") or "").strip(),
         old_length=old_length,
         new_length=new_length,
@@ -233,13 +255,13 @@ class WikimediaStreamClient:
                         ):
                             if stop_event is not None and stop_event.is_set():
                                 break
-                            # Use local receive wall-clock if stream timestamp drifts significantly,
-                            # while keeping real event timestamp when within normal clock skew.
-                            edit = parse_raw_event(payload)
+                            # Rolling windows are measured on this server's clock, so stamp each
+                            # live edit with its receive time. Keeping the upstream timestamp would
+                            # make edits/min read 0 whenever the host clock drifts by more than the
+                            # 60s window (common after laptop sleep in WSL2/Docker). Delivery lag is
+                            # normally ~1s, so this barely changes the displayed edit time.
+                            edit = parse_raw_event(payload, override_timestamp=time.time())
                             if edit is not None:
-                                now = time.time()
-                                if abs(now - edit.timestamp) > 120:
-                                    edit.timestamp = now
                                 yield edit
             except asyncio.CancelledError:
                 self._notify_status(False)
@@ -296,6 +318,7 @@ class WikimediaStreamClient:
             while stop_event is None or not stop_event.is_set():
                 cycle += 1
                 suffix = f"-r{cycle}" if cycle > 1 else ""
+                yielded_this_cycle = 0
                 for raw in raw_events:
                     if stop_event is not None and stop_event.is_set():
                         return
@@ -305,8 +328,13 @@ class WikimediaStreamClient:
                         id_suffix=suffix,
                     )
                     if edit is not None:
+                        yielded_this_cycle += 1
                         yield edit
-                        if interval_seconds > 0:
+                        if interval_seconds <= 0:
+                            # Always hand control back to the event loop, otherwise a zero
+                            # interval starves HTTP, WebSocket and timer tasks entirely.
+                            await asyncio.sleep(0)
+                        else:
                             if stop_event is not None:
                                 try:
                                     await asyncio.wait_for(
@@ -317,6 +345,10 @@ class WikimediaStreamClient:
                                     pass
                             else:
                                 await asyncio.sleep(interval_seconds)
+                if yielded_this_cycle == 0:
+                    # e.g. a recording with only 'log'/'categorize' events: looping would spin forever
+                    logger.warning("No replayable edit events in %s; stopping replay", sample_path)
+                    break
                 if not loop:
                     break
         except asyncio.CancelledError:
