@@ -1,0 +1,23 @@
+# Render Blueprint for the WikiPulse live demo.
+# Render dashboard -> New -> Blueprint -> select this repository. It builds the
+# root Dockerfile (one container serving the API, WebSocket and dashboard).
+services:
+  - type: web
+    name: wikipulse
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: WIKIPULSE_MODE
+        value: live
+      # Optional. Leave empty to run the built-in heuristic AI. Set it to enable the LLM.
+      - key: LLM_API_KEY
+        sync: false
+      # A public demo can be refreshed by anyone: keep the LLM budget low.
+      - key: LLM_MAX_CALLS_PER_MINUTE
+        value: "6"
+      - key: PULSE_REFRESH_MIN_SECONDS
+        value: "45"

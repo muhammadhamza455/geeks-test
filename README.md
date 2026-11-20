@@ -19,9 +19,11 @@ WikiPulse is a real-time media-monitoring dashboard that streams live Wikipedia 
   - Supports **OpenAI** (and OpenAI-compatible endpoints like Ollama/OpenRouter), **Anthropic**, **Google Gemini**, and a **Local Heuristic AI fallback** so the app works out-of-the-box without an API key.
 - **React + TypeScript Dashboard (`frontend/`)**
   - Live WebSocket streaming (`/ws`) with auto-reconnect, per-client wiki filtering, Pause/Resume queue buffer, search, and "Flagged Only" vandalism filter (`frontend/src/components/LiveFeed.tsx`).
-- **Optional Extras Included**
-  - **Docker & `docker-compose.yml`** setup with multi-stage frontend Nginx build + WebSocket reverse proxy.
+- **Optional Extras Included (all four)**
+  - **Go ingestion service** (`ingest-go/`): holds the single Wikimedia connection, filters/validates/de-duplicates edits, and fans a slimmed stream out to any number of backends (see [Go Ingestion Service](#go-ingestion-service-optional)).
+  - **Docker & `docker-compose.yml`** setup with multi-stage frontend Nginx build + WebSocket reverse proxy (plus a Go-ingest override).
   - **End-to-End UI Test in C# + Selenium WebDriver** (`e2e-selenium-csharp/`).
+  - **Deployable live demo**: a single-container production `Dockerfile` and a Render Blueprint (`render.yaml`) — see [Deploying a Live Demo](#deploying-a-live-demo).
 
 ---
 
@@ -30,6 +32,7 @@ WikiPulse is a real-time media-monitoring dashboard that streams live Wikipedia 
 ```text
 Wikimedia SSE Stream ──┐
  (or sample_events.jsonl)
+                       │   (optional) ingest-go: filter · validate · dedupe · fan-out SSE
                        ▼
          backend/stream_client.py
                        │
@@ -60,6 +63,7 @@ Wikimedia SSE Stream ──┐
 - **Node.js 20+** and `npm`
 - *(Optional)* **Docker Desktop** for containerized run
 - *(Optional)* **.NET 10 SDK + Google Chrome** for the C# Selenium E2E suite
+- *(Optional)* **Go 1.24+** for the Go ingestion service (`ingest-go/`)
 
 ### 1. Configure Environment (Optional LLM Key)
 
@@ -121,6 +125,54 @@ docker compose up --build
 
 ---
 
+## Go Ingestion Service (Optional)
+
+`ingest-go/` is a small, dependency-free Go service (standard library only) that takes over the connection to Wikimedia:
+
+- **One upstream connection, many consumers**: it holds the single SSE connection to Wikimedia (reconnect with exponential backoff + jitter, `Last-Event-ID` resume, idle watchdog for silently stalled connections) and fans the stream out to any number of WikiPulse backends — the prerequisite for running several FastAPI workers.
+- **Filters and validates**: drops non-edit events (`log`, `categorize`, ~45% of the firehose) and malformed payloads, strips non-`http(s)` URLs, and de-duplicates replayed events.
+- **Slimmer payloads**: re-serves only the fields WikiPulse uses, in the same `recentchange` field names, so the Python backend consumes it **without code changes** — only `WIKIPULSE_STREAM_URL` changes.
+- **Safe fan-out**: each consumer has a bounded queue; a consumer that falls behind is disconnected instead of blocking ingestion, then resumes from a replay buffer via `Last-Event-ID`.
+- **Observability**: `GET /healthz` reports upstream status, received / forwarded / filtered / malformed / duplicate counts, subscribers, and reconnects.
+
+Run it locally (Go 1.24+):
+
+```bash
+cd ingest-go
+go test ./...
+go run .                       # listens on :8090
+
+# in another terminal, point the backend at it:
+# Windows PowerShell:
+$env:WIKIPULSE_STREAM_URL="http://127.0.0.1:8090/v2/stream/recentchange"
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Or with Docker Compose (adds the `ingest` service and re-points the backend):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.go-ingest.yml up --build
+```
+
+Configuration is via `INGEST_*` environment variables, documented at the top of `ingest-go/main.go`.
+
+---
+
+## Deploying a Live Demo
+
+The root `Dockerfile` builds a **single production container**: FastAPI serves the REST API, the `/ws` WebSocket, and the built dashboard on one port (`$PORT`, as injected by hosting platforms). Test it locally:
+
+```bash
+docker build -t wikipulse .
+docker run --rm -p 8000:8000 wikipulse     # open http://localhost:8000
+```
+
+**Render (one click, free tier):** push the repository to GitHub, then in the Render dashboard choose **New → Blueprint** and select the repository. `render.yaml` configures the Docker build, health check (`/api/health`), and environment. Render supports WebSockets; free instances sleep after ~15 minutes without traffic and take ~1 minute to wake.
+
+> **API key safety:** anyone who can open a public demo can press *Refresh*. `LLM_API_KEY` is optional (the heuristic AI works without it); if you set it, keep `LLM_MAX_CALLS_PER_MINUTE` low (the Blueprint uses 6) so the assignment key's spending limit is protected.
+
+---
+
 ## Running Tests
 
 ### Backend Unit & WebSocket Integration Tests (Pytest)
@@ -135,6 +187,16 @@ Covers:
 - SSE line framing, heartbeats, malformed JSON resilience, IPv4/IPv6/temp-account detection, and `sample_events.jsonl` replay (`test_stream_client.py`)
 - Vandalism heuristics, rollback classification, rate-limit budget guardrails, JSON fence parsing, and mocked OpenAI LLM responses (`test_ai_service.py`)
 - FastAPI REST routes and WebSocket snapshot, filter switching, pulse refresh, and ping/pong (`test_api_ws.py`)
+
+### Go Ingestion Service Tests
+
+```bash
+cd ingest-go
+go vet ./...
+go test ./...
+```
+
+Covers SSE framing (CRLF/CR, multi-line data, truncated events), edit filtering/validation/URL sanitization, de-duplication, hub fan-out with `Last-Event-ID` replay and slow-consumer disconnects, upstream reconnect/resume/idle-watchdog against a fake Wikimedia server, and the HTTP stream end to end. A Python contract test (`test_stream_client.py`) pins the payload format the backend consumes.
 
 ### Frontend Unit & Component Tests (Vitest + React Testing Library)
 
@@ -182,7 +244,7 @@ The E2E suite verifies live edit streaming, non-zero EPM, Top 10 rendering, Repl
 
 ## What I Would Do With More Time
 
-- **Go Ingestion Sidecar + Redis Streams / Pub-Sub**: Move SSE ingestion into a small Go service publishing normalized edits to Redis Streams so multiple FastAPI workers can scale horizontally behind a load balancer.
+- **Horizontal Scaling Behind the Go Ingest Service**: The Go service already fans one Wikimedia connection out to many consumers; the next step is moving rolling stats into Redis (or having the Go service publish to Redis Streams) so several FastAPI workers can serve WebSocket clients behind a load balancer with consistent numbers.
 - **Fetch Real Article Diffs for High-Risk Edits**: Wikimedia's SSE event carries metadata (`comment`, `length.old`, `length.new`) but not the actual text diff. Fetching the revision diff via MediaWiki's Compare API (`/w/rest.php/v1/revision/{id}/compare/{other}`) for Stage-2 candidates would dramatically improve LLM vandalism precision (e.g., catching subtle factual hoaxes or libel with small byte deltas).
 - **Persistent Time-Series & Incident History**: Store minute aggregates and flagged vandalism incidents in PostgreSQL/TimescaleDB so analysts can inspect 24-hour trends and export incident reports.
 - **Observability & CI**: Add Prometheus metrics (`/metrics`), structured JSON logging, and a GitHub Actions workflow running pytest, Vitest, Docker builds, and headless Selenium E2E against Replay mode on every PR.

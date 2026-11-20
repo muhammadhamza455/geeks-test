@@ -1,0 +1,22 @@
+# Optional: route stream ingestion through the Go service (ingest-go/).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.go-ingest.yml up --build
+#
+# The Go service holds the single connection to Wikimedia, filters and validates
+# edits, and re-serves them; the Python backend consumes it via WIKIPULSE_STREAM_URL.
+services:
+  ingest:
+    build:
+      context: .
+      dockerfile: ingest-go/Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      INGEST_UPSTREAM_URL: https://stream.wikimedia.org/v2/stream/recentchange
+    restart: unless-stopped
+
+  backend:
+    environment:
+      WIKIPULSE_STREAM_URL: http://ingest:8090/v2/stream/recentchange
+    depends_on:
+      - ingest

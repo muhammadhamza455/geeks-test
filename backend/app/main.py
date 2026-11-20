@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 import time
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.staticfiles import StaticFiles
+from starlette.types import Receive, Scope, Send
 
 from app.ai_service import AIService, heuristic_vandalism_check
 from app.config import Settings
@@ -29,6 +33,29 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("wikipulse")
+
+
+class SPAStaticFiles(StaticFiles):
+    """Serves the built dashboard; unknown non-API paths fall back to index.html."""
+
+    async def get_response(self, path: str, scope: Scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            # Unknown /api/* routes must stay real 404s, not the dashboard HTML.
+            # (Starlette normalizes `path` with os.path, so it uses "\\" on Windows.)
+            first_segment = path.replace("\\", "/").split("/", 1)[0]
+            if exc.status_code == 404 and first_segment != "api":
+                return await super().get_response("index.html", scope)
+            raise
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            # A WebSocket to an unknown path: reject cleanly instead of erroring
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        await super().__call__(scope, receive, send)
 
 
 class WikiPulseRuntime:
@@ -376,6 +403,16 @@ def create_app(
             runtime.ws_manager.disconnect(websocket)
         except Exception:
             runtime.ws_manager.disconnect(websocket)
+
+    # Optional single-container mode: serve the built dashboard. Mounted last so the
+    # API and WebSocket routes above always take precedence.
+    if app_settings.static_dir:
+        static_path = Path(app_settings.static_dir)
+        if (static_path / "index.html").is_file():
+            app.mount("/", SPAStaticFiles(directory=static_path, html=True), name="dashboard")
+            logger.info("Serving dashboard from %s", static_path)
+        else:
+            logger.warning("WIKIPULSE_STATIC_DIR=%s has no index.html; not serving the UI", static_path)
 
     return app
 

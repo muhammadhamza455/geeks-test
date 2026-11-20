@@ -15,6 +15,11 @@ frontend/dist/
 frontend/.vite/
 *.tsbuildinfo
 
+# Go ingest service build output
+ingest-go/ingest
+ingest-go/ingest.exe
+ingest-go/*.test
+
 # .NET / E2E
 e2e-selenium-csharp/bin/
 e2e-selenium-csharp/obj/

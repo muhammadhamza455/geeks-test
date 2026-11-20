@@ -227,3 +227,33 @@ async def test_replay_stops_when_file_has_no_edit_events(tmp_path):
     client = WikimediaStreamClient()
     edits = [e async for e in client.stream_replay(sample, interval_seconds=0, loop=True)]
     assert edits == []  # terminates instead of spinning forever
+
+
+def test_parse_raw_event_accepts_go_ingest_service_payload():
+    """Contract with ingest-go: its slimmed recentchange payload must parse identically."""
+    slim = {
+        "meta": {"id": "abc-123", "uri": "https://en.wikipedia.org/wiki/Moon"},
+        "type": "new",
+        "wiki": "enwiki",
+        "title": "Moon",
+        "title_url": "https://en.wikipedia.org/wiki/Moon",
+        "server_url": "https://en.wikipedia.org",
+        "server_name": "en.wikipedia.org",
+        "server_script_path": "/w",
+        "user": "~2026-441920",
+        "bot": False,
+        "minor": False,
+        "namespace": 0,
+        "comment": "",
+        "timestamp": 1700000100,
+        "length": {"new": 1245},  # Go omits length.old for new pages
+        "revision": {"new": 11},
+    }
+    edit = parse_raw_event(slim)
+    assert edit is not None
+    assert edit.id == "abc-123"
+    assert edit.is_new is True
+    assert edit.is_anon is True
+    assert edit.old_length == 0 and edit.new_length == 1245 and edit.byte_delta == 1245
+    assert edit.title_url == "https://en.wikipedia.org/wiki/Moon"
+    assert edit.diff_url is None  # no old revision to diff against

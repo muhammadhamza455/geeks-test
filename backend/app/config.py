@@ -97,6 +97,9 @@ class Settings:
     )
 
     # Server
+    # Directory of the built dashboard (frontend/dist). When set, FastAPI serves the UI
+    # itself so the whole app runs as one container (used for the hosted demo).
+    static_dir: str = field(default_factory=lambda: os.getenv("WIKIPULSE_STATIC_DIR", "").strip())
     cors_origins: list[str] = field(
         default_factory=lambda: [
             origin.strip()
