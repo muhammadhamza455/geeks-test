@@ -15,6 +15,24 @@ load_dotenv(_REPO_ROOT / ".env", override=False)
 load_dotenv(_BACKEND_DIR / ".env", override=False)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var, falling back to default when unset, blank, or malformed."""
+    raw = os.getenv(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to default when unset, blank, or malformed."""
+    raw = os.getenv(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
 def _resolve_sample_path(raw_path: str) -> Path:
     candidate = Path(raw_path)
     if candidate.is_absolute():
@@ -35,7 +53,7 @@ class Settings:
         )
     )
     replay_interval_seconds: float = field(
-        default_factory=lambda: float(os.getenv("WIKIPULSE_REPLAY_INTERVAL_SECONDS", "0.35"))
+        default_factory=lambda: max(0.0, _env_float("WIKIPULSE_REPLAY_INTERVAL_SECONDS", 0.35))
     )
     stream_url: str = field(
         default_factory=lambda: os.getenv(
@@ -54,22 +72,28 @@ class Settings:
     llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", "").strip())
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip())
     openai_base_url: str = field(
-        default_factory=lambda: os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        default_factory=lambda: (
+            os.getenv("OPENAI_BASE_URL", "").strip() or "https://api.openai.com/v1"
+        ).rstrip("/")
     )
-    openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip())
+    openai_model: str = field(
+        default_factory=lambda: os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o-mini"
+    )
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "").strip())
     anthropic_model: str = field(
-        default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest").strip()
+        default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "").strip() or "claude-haiku-5-5"
     )
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", "").strip())
-    gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip())
+    gemini_model: str = field(
+        default_factory=lambda: os.getenv("GEMINI_MODEL", "").strip() or "gemini-2.5-flash"
+    )
 
     # Spending / rate-limit guardrails
     llm_max_calls_per_minute: int = field(
-        default_factory=lambda: max(1, int(os.getenv("LLM_MAX_CALLS_PER_MINUTE", "12")))
+        default_factory=lambda: max(1, _env_int("LLM_MAX_CALLS_PER_MINUTE", 12))
     )
     pulse_refresh_min_seconds: int = field(
-        default_factory=lambda: max(5, int(os.getenv("PULSE_REFRESH_MIN_SECONDS", "25")))
+        default_factory=lambda: max(5, _env_int("PULSE_REFRESH_MIN_SECONDS", 25))
     )
 
     # Server

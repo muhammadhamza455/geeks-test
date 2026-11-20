@@ -220,14 +220,28 @@ class SlidingRateLimiter:
 class AIService:
     """Coordinates LLM calls (OpenAI / Anthropic / Gemini) and deterministic fallbacks."""
 
+    # How long a previous LLM Pulse summary may be reused when a refresh call fails
+    LLM_PULSE_GRACE_SECONDS = 120.0
+
     def __init__(
         self,
         settings: Settings,
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         self.settings = settings
-        self._rate_limiter = SlidingRateLimiter(settings.llm_max_calls_per_minute)
+        # Split the per-minute LLM budget so a burst of vandalism candidates on the busy live
+        # stream can never starve the Pulse summary (roughly 1/3 pulse, 2/3 vandalism).
+        total_budget = settings.llm_max_calls_per_minute
+        if total_budget < 2:
+            shared = SlidingRateLimiter(total_budget)
+            self._pulse_limiter = shared
+            self._vandalism_limiter = shared
+        else:
+            pulse_budget = max(1, total_budget // 3)
+            self._pulse_limiter = SlidingRateLimiter(pulse_budget)
+            self._vandalism_limiter = SlidingRateLimiter(total_budget - pulse_budget)
         self._pulse_cache: dict[str, PulseSummary] = {}
+        self._cache_epoch = 0
         self._external_client = http_client
 
     @property
@@ -241,14 +255,28 @@ class AIService:
     def clear_cache(self) -> None:
         """Clear cached Pulse summaries (e.g. when switching stream modes)."""
         self._pulse_cache.clear()
+        # Results from LLM calls that started before this point must not repopulate the cache
+        self._cache_epoch += 1
 
-    async def _call_llm(self, system_prompt: str, user_prompt: str, max_tokens: int = 240) -> Optional[str]:
+    async def _call_llm(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 240,
+        *,
+        purpose: str = "pulse",
+    ) -> Optional[str]:
         """Dispatch a chat completion to the configured LLM provider within rate limits."""
         provider = self.settings.resolved_llm_provider()
         if provider == "heuristic":
             return None
-        if not self._rate_limiter.allow():
-            logger.info("LLM rate limit reached (%d/min); using heuristic fallback", self.settings.llm_max_calls_per_minute)
+        limiter = self._vandalism_limiter if purpose == "vandalism" else self._pulse_limiter
+        if not limiter.allow():
+            logger.info(
+                "LLM %s budget reached (%d/min); using heuristic fallback",
+                purpose,
+                limiter.max_calls_per_minute,
+            )
             return None
 
         owns_client = self._external_client is None
@@ -285,10 +313,12 @@ class AIService:
                         "anthropic-version": "2023-06-01",
                         "Content-Type": "application/json",
                     },
+                    # Current Claude models reject non-default sampling params (temperature) and
+                    # think by default; thinking tokens count toward max_tokens, so leave headroom
+                    # to avoid truncating the short JSON answer.
                     json={
                         "model": self.settings.anthropic_model,
-                        "max_tokens": max_tokens,
-                        "temperature": 0.2,
+                        "max_tokens": max(max_tokens, 1024),
                         "system": system_prompt,
                         "messages": [{"role": "user", "content": user_prompt}],
                     },
@@ -311,7 +341,12 @@ class AIService:
                     json={
                         "systemInstruction": {"parts": [{"text": system_prompt}]},
                         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
+                        # Gemini 2.5 models think by default and thinking tokens count toward
+                        # maxOutputTokens, so leave headroom for the short JSON answer.
+                        "generationConfig": {
+                            "temperature": 0.2,
+                            "maxOutputTokens": max(max_tokens, 1024),
+                        },
                     },
                 )
                 resp.raise_for_status()
@@ -361,7 +396,7 @@ class AIService:
             ensure_ascii=False,
         )
 
-        raw = await self._call_llm(system_prompt, user_prompt, max_tokens=140)
+        raw = await self._call_llm(system_prompt, user_prompt, max_tokens=140, purpose="vandalism")
         if not raw:
             return initial
 
@@ -440,10 +475,14 @@ class AIService:
                     flagged_titles.append(ev.title)
                 if len(flagged_titles) >= 2:
                     break
-            target_str = ", ".join(f'"{t}"' for t in flagged_titles) if flagged_titles else "active pages"
+            notable = (
+                " (notably " + ", ".join(f'"{t}"' for t in flagged_titles) + ")"
+                if flagged_titles
+                else ""
+            )
             parts.append(
                 f"Vandalism watch: {stats.flagged_last_5m} suspicious or rollback "
-                f"event{'s' if stats.flagged_last_5m != 1 else ''} flagged recently (notably {target_str})."
+                f"event{'s' if stats.flagged_last_5m != 1 else ''} flagged recently{notable}."
             )
         else:
             parts.append("No high-risk vandalism patterns have been flagged in the current 5-minute window.")
@@ -549,7 +588,8 @@ class AIService:
             ensure_ascii=False,
         )
 
-        raw = await self._call_llm(system_prompt, user_prompt, max_tokens=260)
+        epoch_at_start = self._cache_epoch
+        raw = await self._call_llm(system_prompt, user_prompt, max_tokens=260, purpose="pulse")
         parsed = _extract_json_object(raw) if raw else None
 
         if parsed and parsed.get("summary"):
@@ -567,8 +607,19 @@ class AIService:
                 generated_at=current,
                 edit_sample_size=stats.edits_last_5m,
             )
+        elif (
+            cached is not None
+            and self._cache_epoch == epoch_at_start
+            and cached.provider != "heuristic"
+            and current - cached.generated_at < self.LLM_PULSE_GRACE_SECONDS
+        ):
+            # Transient LLM failure / budget exhaustion: keep the recent AI briefing rather
+            # than flipping the card to the heuristic summary. Not re-cached, so the next
+            # cycle retries the LLM.
+            return cached
         else:
             result = self._build_heuristic_pulse(stats, recent_edits, current)
 
-        self._pulse_cache[cache_key] = result
+        if self._cache_epoch == epoch_at_start:
+            self._pulse_cache[cache_key] = result
         return result

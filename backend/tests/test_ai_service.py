@@ -282,3 +282,112 @@ async def test_llm_vandalism_and_pulse_with_mocked_openai():
         pulse = await service.generate_pulse_summary(stats, [edit], force=True, now=2000.0)
         assert pulse.provider == "openai:gpt-4o-mini"
         assert "2026 FIFA World Cup" in pulse.summary
+
+
+@pytest.mark.asyncio
+async def test_anthropic_request_shape_and_text_extraction():
+    """Current Claude models reject temperature and think by default: verify the request shape."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = request.headers
+        captured["body"] = json.loads(request.content.decode())
+        answer = json.dumps(
+            {"is_vandalism": True, "severity": "high", "confidence": 0.9, "reason": "Page blanked."}
+        )
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig"},
+                    {"type": "text", "text": answer},
+                ],
+                "stop_reason": "end_turn",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        settings = Settings(llm_provider="anthropic", anthropic_api_key="sk-ant-test")
+        service = AIService(settings, http_client=client)
+        edit = _edit(is_anon=True, byte_delta=-50000, old_length=50100, new_length=100, comment="")
+        initial, _ = heuristic_vandalism_check(edit)
+        refined = await service.verify_vandalism_with_llm(edit, initial)
+
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["headers"]["x-api-key"] == "sk-ant-test"
+    body = captured["body"]
+    assert body["model"] == "claude-haiku-5-5"
+    assert "temperature" not in body
+    assert body["max_tokens"] >= 1024
+    assert refined.source == "llm" and refined.flagged is True and refined.confidence == 0.9
+
+
+@pytest.mark.asyncio
+async def test_vandalism_burst_does_not_starve_pulse_budget():
+    calls = {"vandalism": 0, "pulse": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        if "anti-vandalism" in body["messages"][0]["content"]:
+            calls["vandalism"] += 1
+            content = json.dumps({"is_vandalism": True, "severity": "high", "confidence": 0.9, "reason": "x"})
+        else:
+            calls["pulse"] += 1
+            content = json.dumps({"summary": "LLM pulse summary.", "highlights": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        settings = Settings(llm_provider="openai", openai_api_key="sk-test", llm_max_calls_per_minute=6)
+        service = AIService(settings, http_client=client)
+        edit = _edit(is_anon=True, byte_delta=-50000, old_length=50100, new_length=100, comment="")
+        initial, _ = heuristic_vandalism_check(edit)
+        for _ in range(20):
+            await service.verify_vandalism_with_llm(edit, initial)
+
+        stats = DashboardStats(edits_last_5m=10, edits_per_minute=2, updated_at=1700000000.0)
+        pulse = await service.generate_pulse_summary(stats, [edit], force=True, now=2000.0)
+
+    assert calls["vandalism"] == 4  # 6/min budget -> 2 pulse + 4 vandalism
+    assert calls["pulse"] == 1
+    assert pulse.summary == "LLM pulse summary."
+
+
+def test_settings_tolerate_blank_numeric_and_model_env(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_CALLS_PER_MINUTE", "")
+    monkeypatch.setenv("PULSE_REFRESH_MIN_SECONDS", "not-a-number")
+    monkeypatch.setenv("WIKIPULSE_REPLAY_INTERVAL_SECONDS", "")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "")
+    monkeypatch.setenv("OPENAI_MODEL", "  ")
+    settings = Settings()
+    assert settings.llm_max_calls_per_minute == 12
+    assert settings.pulse_refresh_min_seconds == 25
+    assert settings.replay_interval_seconds == 0.35
+    assert settings.anthropic_model == "claude-haiku-5-5"
+    assert settings.openai_model == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_pulse_keeps_recent_llm_summary_when_refresh_call_fails():
+    state = {"fail": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if state["fail"]:
+            return httpx.Response(500, json={"error": "upstream"})
+        content = json.dumps({"summary": "AI briefing.", "highlights": ["a"]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        settings = Settings(llm_provider="openai", openai_api_key="sk-test", pulse_refresh_min_seconds=25)
+        service = AIService(settings, http_client=client)
+        stats = DashboardStats(edits_last_5m=10, edits_per_minute=2, updated_at=1700000000.0)
+
+        first = await service.generate_pulse_summary(stats, [], now=1000.0)
+        assert first.summary == "AI briefing." and first.provider.startswith("openai")
+
+        state["fail"] = True
+        within_grace = await service.generate_pulse_summary(stats, [], now=1060.0)
+        assert within_grace.summary == "AI briefing."
+
+        after_grace = await service.generate_pulse_summary(stats, [], now=1000.0 + 500)
+        assert after_grace.provider == "heuristic"
